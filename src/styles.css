@@ -783,3 +783,13 @@ textarea {
   height: 1px;
   background: var(--line);
 }
+
+.hidden-file {
+  display: none;
+}
+
+.btn.ghost.wide {
+  margin-bottom: 18px;
+  padding: 14px;
+  font-size: 14px;
+}

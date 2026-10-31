@@ -67,23 +67,39 @@ node index.mjs
 
 然后在手机上打开 App，点「扫码配对」，对着终端扫一下即可。
 
-相机不可用时，把终端里那串 `dp1.…` 配对码整段粘进 App 的输入框，效果一样。
+**不在电脑前？**（比如用远程桌面）桥启动时会把二维码存成一张图片：
+
+```
+~/Desktop/droid-pocket-pairing.png
+```
+
+把它传/截到手机上，点 App 里的「从相册选二维码」，选这张图就行。
+
+相机和相册都不方便时，把终端里那串 `dp1.…` 配对码整段粘进输入框，效果一样。
 
 想用网页看二维码：浏览器打开 `http://127.0.0.1:8787/`（这个页面带配对码，所以只允许本机访问）。
 
 ### 常用参数
 
 ```bash
-node index.mjs --port 8787          # 换端口
-node index.mjs --name "Mac mini"    # 换显示名
-node index.mjs --host 127.0.0.1     # 只允许本机连（默认 0.0.0.0）
+node index.mjs --port 8787                        # 换端口
+node index.mjs --name "Mac mini"                  # 换显示名
+node index.mjs --host 127.0.0.1                   # 只允许本机连（默认 0.0.0.0）
+node index.mjs --qr-out ~/Desktop/pair.png        # 换二维码图片位置，none 表示不生成
+node index.mjs --public-url https://mac.tailnet.ts.net  # 手动指定写进二维码的地址
 ```
+
+`--public-url` 用于自动探测不对的情况，比如你走 `tailscale serve` 发布了 HTTPS 域名。
 
 配对令牌保存在 `~/.droid-pocket/config.json`。删掉这个文件就会生成新的令牌，旧手机需要重新配对。
 
 ### 在外面用
 
-家里同一局域网直接就能连。要在外面用，两边都装 Tailscale 并登录同一个 tailnet，然后用 Tailscale 地址配对（桥启动时会自动列出，标记为 `Tailscale`）。
+家里同一局域网直接就能连。
+
+要用 Tailscale：两边都装并登录同一个 tailnet，桥会自动检测到 Tailscale 并把它的地址放进二维码（标记为 `Tailscale`）。检测依据是 `tailscale status` 的 `BackendState` 为 `Running` —— 关闭状态下 `tailscale ip` 仍会返回一个缓存地址，那是打不通的，所以不能只看 IP。
+
+如果 Tailscale 地址连不上，用 `--public-url` 显式指定一个能通的地址。
 
 ## 从源码构建
 

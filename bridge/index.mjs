@@ -19,11 +19,14 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.2.0";
+const execFileAsync = promisify(execFile);
+
+const VERSION = "0.2.1";
 const CONFIG_DIR = path.join(os.homedir(), ".droid-pocket");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const SESSIONS_ROOT = path.join(os.homedir(), ".factory", "sessions");
@@ -97,11 +100,43 @@ async function randomBytes(length) {
   return nodeRandom(length);
 }
 
-function addresses() {
+/**
+ * The macOS Tailscale app runs as a userspace network extension, so its 100.x
+ * address never shows up in `os.networkInterfaces()`. Ask the CLI instead, but
+ * only trust it while the backend is actually running: `tailscale ip -4` keeps
+ * answering with a stale address after the daemon is stopped.
+ */
+async function tailscaleAddress() {
+  try {
+    const { stdout } = await execFileAsync("tailscale", ["status", "--json"], {
+      timeout: 2500,
+    });
+    const status = JSON.parse(stdout);
+    if (status.BackendState !== "Running") return null;
+    const ips = status.Self?.TailscaleIPs ?? [];
+    const v4 = ips.find((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip));
+    if (v4) return v4;
+  } catch {
+    /* tailscale is optional */
+  }
+  return null;
+}
+
+async function addresses() {
   const out = [];
+  const seen = new Set();
+
+  const tailscale = await tailscaleAddress();
+  if (tailscale) {
+    out.push({ name: "tailscale", address: tailscale, tailscale: true });
+    seen.add(tailscale);
+  }
+
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
     for (const entry of list || []) {
       if (entry.family !== "IPv4" || entry.internal) continue;
+      if (seen.has(entry.address)) continue;
+      seen.add(entry.address);
       out.push({
         name,
         address: entry.address,
@@ -112,6 +147,14 @@ function addresses() {
   // Tailscale addresses first: they work away from home.
   out.sort((a, b) => Number(b.tailscale) - Number(a.tailscale));
   return out;
+}
+
+/** The address that goes into the pairing code. */
+async function pairingUrl(port, publicUrl) {
+  if (publicUrl) return publicUrl.replace(/\/+$/, "");
+  const list = await addresses();
+  const primary = list[0];
+  return `http://${primary ? primary.address : "127.0.0.1"}:${port}`;
 }
 
 // ----------------------------------------------------------------- sessions
@@ -458,6 +501,19 @@ async function qrTerminal(text) {
   });
 }
 
+/** Write a standalone QR image the user can screenshot or send to the phone. */
+async function writeQrPng(text, outPath) {
+  const { default: QRCode } = await import("qrcode");
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+  await QRCode.toFile(outPath, text, {
+    type: "png",
+    width: 720,
+    margin: 2,
+    errorCorrectionLevel: "M",
+  });
+  return outPath;
+}
+
 function landingPage({ name, urls, code, qr }) {
   const options = urls
     .map(
@@ -555,14 +611,14 @@ async function main() {
           });
           return;
         }
-        const primary = addresses()[0];
-        const target = `http://${primary ? primary.address : "127.0.0.1"}:${port}`;
+        const list = await addresses();
+        const target = await pairingUrl(port, flag("public-url", ""));
         const code = pairingCode({ url: target, token: config.token, name });
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(
           landingPage({
             name,
-            urls: addresses().map((a) => ({ ...a, port })),
+            urls: list.map((a) => ({ ...a, port })),
             code,
             qr: await qrSvg(code),
           }),
@@ -643,9 +699,8 @@ async function main() {
   });
 
   server.listen(port, host, async () => {
-    const list = addresses();
-    const primary = list[0];
-    const target = `http://${primary ? primary.address : "127.0.0.1"}:${port}`;
+    const list = await addresses();
+    const target = await pairingUrl(port, flag("public-url", ""));
     const code = pairingCode({ url: target, token: config.token, name });
 
     console.log(`\n  Droid Pocket bridge v${VERSION}  ·  ${name}\n`);
@@ -663,10 +718,27 @@ async function main() {
         `    http://${entry.address}:${port}${entry.tailscale ? "   (Tailscale)" : ""}`,
       );
     }
+
+    const qrOut = flag(
+      "qr-out",
+      path.join(os.homedir(), "Desktop", "droid-pocket-pairing.png"),
+    );
+    if (qrOut && qrOut !== "none") {
+      try {
+        await writeQrPng(code, qrOut);
+        console.log(`\n  QR image:      ${qrOut}`);
+      } catch (error) {
+        console.log(`\n  Could not write the QR image: ${error.message}`);
+      }
+    }
+
     console.log(`\n  Pairing page:  http://127.0.0.1:${port}/`);
     console.log(`  Pairing code:  ${code}`);
     console.log(
-      "\n  The phone needs no API key: turns run through this computer's `droid` login.\n",
+      "\n  The phone needs no API key: turns run through this computer's `droid` login.",
+    );
+    console.log(
+      "  No camera on the phone? Screenshot the QR image and pick it from the gallery.\n",
     );
     console.log("  Ctrl+C to stop.\n");
     void target;

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   CapacitorBarcodeScanner,
   CapacitorBarcodeScannerCameraDirection,
@@ -10,6 +10,7 @@ import {
   parsePairingCode,
   type ConnectionConfig,
 } from "../lib/config";
+import { decodeQrFromFile } from "../lib/qr";
 
 interface Props {
   initial: ConnectionConfig;
@@ -29,6 +30,21 @@ export default function ConnectScreen({
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(!initial.url);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const connectWithCode = async (code: string) => {
+    const payload = parsePairingCode(code);
+    if (!payload) {
+      setScanError("这不是 Droid Pocket 的配对码。");
+      return false;
+    }
+    return onConnect({
+      url: payload.u,
+      token: payload.t,
+      cwd: initial.cwd,
+      name: payload.n,
+    });
+  };
 
   const scan = async () => {
     setScanError(null);
@@ -41,17 +57,7 @@ export default function ConnectScreen({
         cameraDirection: CapacitorBarcodeScannerCameraDirection.BACK,
         scanOrientation: CapacitorBarcodeScannerScanOrientation.ADAPTIVE,
       });
-      const payload = parsePairingCode(result.ScanResult ?? "");
-      if (!payload) {
-        setScanError("这不是 Droid Pocket 的配对码。");
-        return;
-      }
-      await onConnect({
-        url: payload.u,
-        token: payload.t,
-        cwd: initial.cwd,
-        name: payload.n,
-      });
+      await connectWithCode(result.ScanResult ?? "");
     } catch (err) {
       setScanError(
         err instanceof Error
@@ -60,6 +66,27 @@ export default function ConnectScreen({
       );
     } finally {
       setScanning(false);
+    }
+  };
+
+  const pickImage = async (file: File | undefined) => {
+    if (!file) return;
+    setScanError(null);
+    setScanning(true);
+    try {
+      const code = await decodeQrFromFile(file);
+      if (!code) {
+        setScanError("这张图里没找到二维码，换一张清晰的截图试试。");
+        return;
+      }
+      await connectWithCode(code);
+    } catch (err) {
+      setScanError(
+        err instanceof Error ? err.message : "读取这张图片失败，换一张试试。",
+      );
+    } finally {
+      setScanning(false);
+      if (fileRef.current) fileRef.current.value = "";
     }
   };
 
@@ -95,8 +122,23 @@ export default function ConnectScreen({
         onClick={scan}
         disabled={busy || scanning}
       >
-        {scanning ? "打开相机…" : "扫码配对"}
+        {scanning ? "处理中…" : "扫码配对"}
       </button>
+
+      <button
+        className="btn ghost wide"
+        onClick={() => fileRef.current?.click()}
+        disabled={busy || scanning}
+      >
+        从相册选二维码
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden-file"
+        onChange={(event) => void pickImage(event.target.files?.[0])}
+      />
 
       {scanError ? <div className="error-box">{scanError}</div> : null}
       {error ? <div className="error-box">{error}</div> : null}
@@ -157,14 +199,20 @@ export default function ConnectScreen({
 
           <h3>2. 手机和电脑在同一网络</h3>
           <p>
-            家里用局域网就行。要在外面用，两边都开 Tailscale，
-            然后把配对码里的地址换成 Tailscale 的地址。
+            家里用局域网就行。要在外面用，两边都开 Tailscale， 桥会自动把
+            Tailscale 地址放进二维码里。
           </p>
 
-          <h3>3. 扫码</h3>
+          <h3>3. 扫码，或者从相册选</h3>
           <p>
-            点上面的「扫码配对」。相机不可用时，把终端里的配对码整串粘进来也可以。
+            直接扫电脑屏幕上的二维码。不在电脑前（比如用远程桌面）就先截个图，
+            再点「从相册选二维码」把截图选进来。
           </p>
+          <p>
+            桥启动时还会把二维码存成图片：
+            <code>~/Desktop/droid-pocket-pairing.png</code>。
+          </p>
+          <p>都不方便的话，把终端里的配对码整串粘进来也可以。</p>
         </div>
       ) : null}
     </div>
