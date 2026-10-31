@@ -24,10 +24,12 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install SDK platform
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0" > /dev/null
+      - name: Ensure Android SDK platform
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
       - name: Install dependencies
         run: npm ci
