@@ -1,5 +1,15 @@
 import { useState } from "react";
-import type { ConnectionConfig } from "../lib/config";
+import {
+  CapacitorBarcodeScanner,
+  CapacitorBarcodeScannerCameraDirection,
+  CapacitorBarcodeScannerScanOrientation,
+  CapacitorBarcodeScannerTypeHint,
+} from "@capacitor/barcode-scanner";
+import {
+  normalizeUrl,
+  parsePairingCode,
+  type ConnectionConfig,
+} from "../lib/config";
 
 interface Props {
   initial: ConnectionConfig;
@@ -15,14 +25,59 @@ export default function ConnectScreen({
   onConnect,
 }: Props) {
   const [url, setUrl] = useState(initial.url);
-  const [apiKey, setApiKey] = useState(initial.apiKey);
+  const [token, setToken] = useState(initial.token);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(!initial.url);
+
+  const scan = async () => {
+    setScanError(null);
+    setScanning(true);
+    try {
+      const result = await CapacitorBarcodeScanner.scanBarcode({
+        hint: CapacitorBarcodeScannerTypeHint.QR_CODE,
+        scanInstructions: "对准电脑终端里的二维码",
+        scanButton: false,
+        cameraDirection: CapacitorBarcodeScannerCameraDirection.BACK,
+        scanOrientation: CapacitorBarcodeScannerScanOrientation.ADAPTIVE,
+      });
+      const payload = parsePairingCode(result.ScanResult ?? "");
+      if (!payload) {
+        setScanError("这不是 Droid Pocket 的配对码。");
+        return;
+      }
+      await onConnect({
+        url: payload.u,
+        token: payload.t,
+        cwd: initial.cwd,
+        name: payload.n,
+      });
+    } catch (err) {
+      setScanError(
+        err instanceof Error
+          ? `无法打开相机：${err.message}`
+          : "无法打开相机，请手动填写。",
+      );
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    const pasted = parsePairingCode(token);
+    if (pasted) {
+      await onConnect({
+        url: pasted.u,
+        token: pasted.t,
+        cwd: initial.cwd,
+        name: pasted.n,
+      });
+      return;
+    }
     await onConnect({
-      url: url.trim(),
-      apiKey: apiKey.trim(),
+      url: normalizeUrl(url),
+      token: token.trim(),
       cwd: initial.cwd,
     });
   };
@@ -32,16 +87,31 @@ export default function ConnectScreen({
       <div className="brand">
         <div className="brand-mark">◈</div>
         <h1>Droid Pocket</h1>
-        <p className="brand-sub">连接你电脑上的 Droid</p>
+        <p className="brand-sub">连接你电脑上的 Droid，模型走电脑上的配置</p>
+      </div>
+
+      <button
+        className="btn primary wide scan-btn"
+        onClick={scan}
+        disabled={busy || scanning}
+      >
+        {scanning ? "打开相机…" : "扫码配对"}
+      </button>
+
+      {scanError ? <div className="error-box">{scanError}</div> : null}
+      {error ? <div className="error-box">{error}</div> : null}
+
+      <div className="divider">
+        <span>或手动填写</span>
       </div>
 
       <form className="form" onSubmit={submit}>
         <label className="field">
-          <span>守护进程地址</span>
+          <span>电脑地址</span>
           <input
             value={url}
             onChange={(event) => setUrl(event.target.value)}
-            placeholder="wss://macbook.tailnet.ts.net:8443"
+            placeholder="http://192.168.1.46:8787"
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
@@ -50,57 +120,50 @@ export default function ConnectScreen({
         </label>
 
         <label className="field">
-          <span>Factory API Key</span>
+          <span>配对码</span>
           <input
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder="fk-..."
-            type="password"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+            placeholder="dp1.…（也可以直接粘贴整串配对码）"
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
           />
         </label>
 
-        {url.trim().startsWith("ws://") ? (
-          <div className="warn-box">
-            正在使用未加密的 ws:// 连接。局域网自用可以，公网务必换成 wss://。
-          </div>
-        ) : null}
-
-        {error ? <div className="error-box">{error}</div> : null}
-
         <button
           className="btn primary wide"
           type="submit"
-          disabled={busy || !url || !apiKey}
+          disabled={busy || !token.trim()}
         >
           {busy ? "连接中…" : "连接"}
         </button>
       </form>
 
       <button className="link" onClick={() => setShowHelp((value) => !value)}>
-        {showHelp ? "收起配置说明" : "怎么配置？"}
+        {showHelp ? "收起说明" : "电脑上要做什么？"}
       </button>
 
       {showHelp ? (
         <div className="help">
-          <h3>1. 电脑上启动守护进程</h3>
-          <pre>droid daemon -p 3101 --listen websocket</pre>
-          <p>它只监听 127.0.0.1，本身不带 TLS，不要直接暴露到公网。</p>
-
-          <h3>2. 用 Tailscale 把它安全地发布到你的设备网络</h3>
-          <pre>tailscale serve --bg --https=8443 http://127.0.0.1:3101</pre>
+          <h3>1. 电脑上启动桥</h3>
+          <pre>
+            cd bridge{"\n"}npm install{"\n"}node index.mjs
+          </pre>
           <p>
-            然后在这里填{" "}
-            <code>wss://&lt;机器名&gt;.&lt;你的 tailnet&gt;.ts.net:8443</code>。
-            手机装上 Tailscale 并登录同一个 tailnet 即可。
+            终端会打印一个二维码和配对码。桥只是替你调用本机已经登录好的{" "}
+            <code>droid</code>，所以手机不需要任何 API Key。
           </p>
 
-          <h3>3. 填 API Key</h3>
+          <h3>2. 手机和电脑在同一网络</h3>
           <p>
-            在 <code>app.factory.ai/settings/api-keys</code> 生成一个 Factory
-            API Key。 它只保存在这台手机本地。
+            家里用局域网就行。要在外面用，两边都开 Tailscale，
+            然后把配对码里的地址换成 Tailscale 的地址。
+          </p>
+
+          <h3>3. 扫码</h3>
+          <p>
+            点上面的「扫码配对」。相机不可用时，把终端里的配对码整串粘进来也可以。
           </p>
         </div>
       ) : null}

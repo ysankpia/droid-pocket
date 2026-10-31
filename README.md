@@ -1,69 +1,89 @@
 # Droid Pocket
 
-把你的 Droid 装进口袋。Android 客户端，直连你电脑上的 `droid daemon`，手机只做界面，真正的活在你电脑上干。
+把你的 Droid 装进口袋。Android 客户端 + 电脑端桥，手机只做界面，真正的活在你电脑上干。
 
-> 非官方项目，与 Factory 无关联。使用公开的 `@factory/droid-sdk` 和你自己的 `droid daemon`。
+> 非官方项目，与 Factory 无关联。
 
 ## 它解决什么问题
 
 Droid CLI 很强，但它绑在终端里。你不在电脑前的时候，想法就断了。
 
-Droid Pocket 让手机变成一块遥控屏：
+Droid Pocket 让手机变成一块遥控屏：看会话、发消息、看工具调用、随时打断。手机端**不跑任何 Agent 逻辑** —— MCP、Skills、Hooks、Plugins、Custom Droids、Missions、worktree 全部由电脑上的原版 `droid` 提供，配置零改动。
 
-- 会话列表、新建会话、继续旧会话
-- 流式输出、Markdown、代码块
-- 工具调用卡片，点开看完整输入输出
-- 权限审批弹窗，允许一次 / 总是允许 / 拒绝
-- 随时打断
-
-**关键在于**：手机端不跑任何 Agent 逻辑。MCP、Skills、Hooks、Plugins、Custom Droids、Missions、worktree 全部由电脑上的原版 droid 提供，配置零改动。
+**手机端不需要任何 API Key。** 所有认证都发生在电脑上。
 
 ## 架构
 
 ```
-┌──────────────┐     wss://      ┌─────────────────────────┐
-│  Android App │ ──────────────▶ │  droid daemon           │
-│  Capacitor   │                 │  127.0.0.1:3101         │
-│  React       │ ◀────────────── │        │                │
-└──────────────┘   JSON-RPC 事件  │        ▼                │
-                                  │  droid exec             │
-                                  │  你的仓库 / git / 依赖   │
-                                  └─────────────────────────┘
+┌──────────────┐    HTTP + NDJSON   ┌──────────────────────┐
+│  Android App │ ─────────────────▶ │  droid-pocket bridge │
+│  Capacitor   │                    │  你的电脑 :8787      │
+│  React       │ ◀───────────────── │        │             │
+└──────────────┘      事件流        │        ▼             │
+                                    │  droid exec          │
+                                    │  ~/.factory 登录态    │
+                                    │  你的仓库 / git / 依赖 │
+                                    └──────────────────────┘
 ```
+
+桥是一个很小的 Node 进程。它接收手机发来的消息，转成一次 `droid exec` 调用，再把输出事件流回手机。
+
+### 为什么不用官方 SDK
+
+`@factory/droid-sdk` 在 spawn 子进程时**无条件**注入 `FACTORY_API_KEY`（见 `node.mjs` 的 `createTransport` / `resolveApiKey`），没有 key 就直接抛错，也不会回退到本机已保存的登录态。这意味着走 SDK 就必须在手机上放一把 Factory API Key。
+
+而 `droid exec` 这条命令行完全不碰 SDK，它直接读本机 `~/.factory/auth.v2.loginkeychain` 里的登录态，并且使用 `~/.factory/settings.json` 里配置的 `customModels`（BYOK）。所以桥选的是 CLI，不是 SDK。
+
+顺带一提：官方文档明确写了个人自定义模型**只**出现在 CLI 和桌面端，不会出现在 Factory 托管的 web / 移动端。所以想在手机上用自己的 provider，只能自建客户端。
 
 ## 安装
 
-从 [Releases](../../releases/latest) 下载 `app-release.apk` 直接安装。要求 Android 8.0 以上、arm64 设备。
+从 [Releases](../../releases/latest) 下载 `app-release.apk`。要求 Android 8.0 以上。
 
-## 配置（电脑侧）
-
-### 1. 启动守护进程
+## 使用（电脑侧）
 
 ```bash
-droid daemon -p 3101 --listen websocket
+cd bridge
+npm install
+node index.mjs
 ```
 
-它只监听 `127.0.0.1`，本身**不带 TLS**，不要直接绑到 `0.0.0.0` 或公网。
+终端会打印一个二维码、配对码和本机地址：
 
-### 2. 用 Tailscale 安全地发布到你的设备网络
+```
+  Droid Pocket bridge v0.2.0  ·  your-mac
+
+  Scan this with Droid Pocket:
+
+  █▀▀▀▀▀█ ▄▀ ▄▀▀█ ...
+  ...
+
+  Addresses:
+    http://192.168.1.46:8787
+    http://100.101.102.103:8787   (Tailscale)
+
+  Pairing page:  http://127.0.0.1:8787/
+```
+
+然后在手机上打开 App，点「扫码配对」，对着终端扫一下即可。
+
+相机不可用时，把终端里那串 `dp1.…` 配对码整段粘进 App 的输入框，效果一样。
+
+想用网页看二维码：浏览器打开 `http://127.0.0.1:8787/`（这个页面带配对码，所以只允许本机访问）。
+
+### 常用参数
 
 ```bash
-tailscale serve --bg --https=8443 http://127.0.0.1:3101
+node index.mjs --port 8787          # 换端口
+node index.mjs --name "Mac mini"    # 换显示名
+node index.mjs --host 127.0.0.1     # 只允许本机连（默认 0.0.0.0）
 ```
 
-拿到一个形如 `https://<机器名>.<你的tailnet>.ts.net:8443` 的地址。
+配对令牌保存在 `~/.droid-pocket/config.json`。删掉这个文件就会生成新的令牌，旧手机需要重新配对。
 
-手机装 Tailscale 并登录同一个 tailnet，App 里填：
+### 在外面用
 
-```
-wss://<机器名>.<你的tailnet>.ts.net:8443
-```
-
-> 也支持 SSH 隧道或局域网直连（`ws://192.168.x.x:3101`），但公网务必用 `wss://`。
-
-### 3. 填 API Key
-
-在 `app.factory.ai/settings/api-keys` 生成一个 Factory API Key，填进 App。它只保存在这台手机上。
+家里同一局域网直接就能连。要在外面用，两边都装 Tailscale 并登录同一个 tailnet，然后用 Tailscale 地址配对（桥启动时会自动列出，标记为 `Tailscale`）。
 
 ## 从源码构建
 
@@ -91,15 +111,18 @@ export ANDROID_KEY_PASSWORD=...
 
 ## 安全
 
-- API Key 只存在手机本地（Capacitor Preferences），不上传任何服务器
-- 没有中转服务器，没有第三方后端，手机直连你的电脑
-- `wss://` 端到端加密由 Tailscale 提供
-- 使用 `ws://` 时 App 会显示警告
+- 手机上不保存任何模型 API Key，也没有 Factory 凭据
+- 手机和电脑之间用一个随机配对令牌做鉴权，令牌只存在两端本地
+- 没有中转服务器，没有第三方后端
+- 桥默认监听 `0.0.0.0`，方便局域网连接；只在本机用可以加 `--host 127.0.0.1`
+- 带配对码的网页只允许从本机访问
+- 局域网是明文 HTTP。跨网络请用 Tailscale（自带加密），不要把 8787 端口直接暴露到公网
 
 ## 已知限制
 
+- 自治级别按会话设定，一次 `droid exec` 跑完一轮；不提供逐条权限审批弹窗（CLI 非交互模式本身也不弹）
+- 回复是整段到达，不是逐字流式（`droid exec -o stream-json` 不提供增量文本）；工具调用是实时推送的
 - 暂不支持图片/文件附件
-- 暂不支持 MCP 授权流程的交互界面（在电脑上配置即可）
 - 断线后需要手动重连
 - 只做了聊天核心，没有 Missions / Automations 的专门界面
 

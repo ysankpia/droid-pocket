@@ -1,0 +1,24 @@
+{
+  "name": "droid-pocket-bridge",
+  "version": "0.2.0",
+  "description": "Bridge that lets Droid Pocket on your phone drive the Droid CLI already installed on your computer. No API key required.",
+  "type": "module",
+  "bin": {
+    "droid-pocket": "./index.mjs"
+  },
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

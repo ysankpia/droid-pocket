@@ -1,104 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  AutonomyLevel,
-  ToolConfirmationOutcome,
-  connectToDaemon,
-} from "@factory/droid-sdk";
+import { useCallback, useRef, useState } from "react";
 import type { ConnectionConfig } from "./config";
-import type { ChatItem, PendingPermission, SessionRow } from "./types";
+import type { ChatItem, SessionRow } from "./types";
 
 type Status = "idle" | "connecting" | "connected" | "error";
+type Autonomy = "off" | "low" | "medium" | "high";
 
 let seq = 0;
 const nextId = () => `i${Date.now().toString(36)}${(seq++).toString(36)}`;
 
-function textOf(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    return value
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "text" in part) {
-          return String((part as { text?: unknown }).text ?? "");
-        }
-        return "";
-      })
-      .join("");
-  }
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    if (typeof record.text === "string") return record.text;
-    if (record.content !== undefined) return textOf(record.content);
-    if (record.message !== undefined) return textOf(record.message);
-  }
-  return "";
-}
-
-function stringifyInput(input: unknown): string {
-  if (input == null) return "";
-  if (typeof input === "string") return input;
-  try {
-    const text = JSON.stringify(input, null, 2);
-    return text.length > 1200 ? `${text.slice(0, 1200)}\n…` : text;
-  } catch {
-    return String(input);
-  }
-}
-
-function normalizeHistory(raw: unknown): ChatItem[] {
-  if (!Array.isArray(raw)) return [];
-  const out: ChatItem[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== "object") continue;
-    const msg = entry as Record<string, unknown>;
-    const type = String(msg.type ?? "");
-    if (type === "tool_call") {
-      out.push({
-        kind: "tool",
-        id: nextId(),
-        toolUseId: String(msg.toolUseId ?? ""),
-        name: String(msg.name ?? msg.toolName ?? "tool"),
-        input: msg.input ?? {},
-        running: false,
-      });
-      continue;
+async function call<T>(
+  config: ConnectionConfig,
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await fetch(`${config.url}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-droid-pocket-token": config.token,
+    },
+    body: JSON.stringify(body ?? {}),
+    signal,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    let message = text || `HTTP ${response.status}`;
+    try {
+      message = (JSON.parse(text) as { error?: string }).error ?? message;
+    } catch {
+      /* keep the raw body */
     }
-    if (type === "tool_result") {
-      const existing = out.find(
-        (item): item is Extract<ChatItem, { kind: "tool" }> =>
-          item.kind === "tool" &&
-          item.toolUseId === String(msg.toolUseId ?? ""),
-      );
-      const content = textOf(msg.content);
-      if (existing) {
-        existing.result = content;
-        existing.isError = Boolean(msg.isError);
-        existing.running = false;
-      } else {
-        out.push({
-          kind: "tool",
-          id: nextId(),
-          toolUseId: String(msg.toolUseId ?? ""),
-          name: String(msg.toolName ?? "tool"),
-          input: {},
-          result: content,
-          isError: Boolean(msg.isError),
-          running: false,
-        });
-      }
-      continue;
-    }
-    const text = textOf(msg.text ?? msg.message ?? msg.content);
-    if (!text.trim()) continue;
-    const role = String(msg.role ?? (type === "user" ? "user" : "assistant"));
-    out.push(
-      role === "user"
-        ? { kind: "user", id: nextId(), text }
-        : { kind: "assistant", id: nextId(), text, streaming: false },
-    );
+    throw new Error(message);
   }
-  return out;
+  return (text ? JSON.parse(text) : {}) as T;
 }
 
 export function useDroid() {
@@ -107,178 +42,88 @@ export function useDroid() {
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [busy, setBusy] = useState(false);
-  const [permission, setPermission] = useState<PendingPermission | null>(null);
-  const [title, setTitle] = useState<string>("");
+  const [title, setTitle] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [computer, setComputer] = useState<string>("");
+  const [model, setModel] = useState<string>("");
 
-  const droidRef = useRef<any>(null);
-  const sessionRef = useRef<any>(null);
-  const summariesRef = useRef<any[]>([]);
-  const permissionResolveRef = useRef<((outcome: string) => void) | null>(null);
-  const deltaRef = useRef<{ messageId: string; text: string } | null>(null);
-  const flushTimerRef = useRef<number | null>(null);
+  const configRef = useRef<ConnectionConfig | null>(null);
+  const cwdRef = useRef<string>("");
+  const autonomyRef = useRef<Autonomy>("medium");
+  const abortRef = useRef<AbortController | null>(null);
 
   const appendItem = useCallback((item: ChatItem) => {
     setItems((prev) => [...prev, item]);
   }, []);
 
-  const patchItem = useCallback((id: string, patch: Partial<ChatItem>) => {
-    setItems((prev) =>
-      prev.map((item) =>
-        item.id === id ? ({ ...item, ...patch } as ChatItem) : item,
-      ),
-    );
-  }, []);
-
-  const flushDelta = useCallback(() => {
-    const pending = deltaRef.current;
-    if (!pending) return;
-    deltaRef.current = null;
-    setItems((prev) => {
-      const last = prev[prev.length - 1];
-      if (
-        last &&
-        last.kind === "assistant" &&
-        last.streaming &&
-        last.id === pending.messageId
-      ) {
-        return [
-          ...prev.slice(0, -1),
-          { ...last, text: last.text + pending.text },
-        ];
-      }
-      return [
-        ...prev,
-        {
-          kind: "assistant",
-          id: pending.messageId,
-          text: pending.text,
-          streaming: true,
-        },
-      ];
-    });
-  }, []);
-
-  useEffect(() => {
-    flushTimerRef.current = window.setInterval(flushDelta, 60);
-    return () => {
-      if (flushTimerRef.current) window.clearInterval(flushTimerRef.current);
-    };
-  }, [flushDelta]);
-
-  const permissionHandler = useCallback((params: any) => {
-    return new Promise<string>((resolve) => {
-      permissionResolveRef.current = resolve;
-      const toolName =
-        params?.toolName ??
-        params?.tool ??
-        params?.confirmationType ??
-        "工具调用";
-      setPermission({
-        id: nextId(),
-        title: String(toolName),
-        detail: stringifyInput(params?.toolInput ?? params?.input ?? params),
-        resolve: (outcome: string) => {
-          permissionResolveRef.current = null;
-          setPermission(null);
-          resolve(outcome);
-        },
-      });
-    });
-  }, []);
-
   const handleEvent = useCallback(
-    (event: any) => {
-      const type = String(event?.type ?? "");
-      switch (type) {
-        case "assistant_text_delta": {
-          const messageId = String(event.messageId ?? nextId());
-          const existing = deltaRef.current;
-          if (existing && existing.messageId === messageId) {
-            existing.text += String(event.text ?? "");
-          } else {
-            deltaRef.current = { messageId, text: String(event.text ?? "") };
-          }
+    (event: Record<string, unknown>) => {
+      switch (String(event.type ?? "")) {
+        case "session": {
+          if (event.sessionId) setSessionId(String(event.sessionId));
+          if (event.cwd) cwdRef.current = String(event.cwd);
+          if (event.model) setModel(String(event.model));
           return;
         }
-        case "assistant": {
-          const text = String(event.text ?? "");
-          if (!text.trim()) return;
-          const messageId = String(event.message?.id ?? nextId());
-          setItems((prev) => {
-            const idx = prev.findIndex(
-              (item) => item.kind === "assistant" && item.id === messageId,
-            );
-            if (idx >= 0) {
-              const copy = [...prev];
-              copy[idx] = {
-                kind: "assistant",
-                id: messageId,
-                text,
-                streaming: false,
-              };
-              return copy;
-            }
-            const last = prev[prev.length - 1];
-            if (last && last.kind === "assistant" && last.streaming) {
-              return [
-                ...prev.slice(0, -1),
-                { kind: "assistant", id: last.id, text, streaming: false },
-              ];
-            }
-            return [
-              ...prev,
-              { kind: "assistant", id: messageId, text, streaming: false },
-            ];
-          });
+        case "echo":
+          // The user's own message was already rendered when it was sent.
           return;
-        }
         case "tool_call": {
           appendItem({
             kind: "tool",
             id: nextId(),
-            toolUseId: String(event.toolUseId ?? ""),
-            name: String(event.name ?? event.toolName ?? "tool"),
+            toolUseId: String(event.id ?? ""),
+            name: String(event.name ?? "tool"),
             input: event.input ?? {},
             running: true,
           });
           return;
         }
         case "tool_result": {
-          const toolUseId = String(event.toolUseId ?? "");
+          const toolUseId = String(event.id ?? "");
           setItems((prev) => {
-            const idx = prev.findIndex(
+            const index = prev.findIndex(
               (item) => item.kind === "tool" && item.toolUseId === toolUseId,
             );
-            if (idx < 0) return prev;
-            const copy = [...prev];
-            const current = copy[idx] as Extract<ChatItem, { kind: "tool" }>;
-            copy[idx] = {
+            if (index < 0) return prev;
+            const next = [...prev];
+            const current = next[index] as Extract<ChatItem, { kind: "tool" }>;
+            next[index] = {
               ...current,
-              result: textOf(event.content),
+              result: String(event.content ?? ""),
               isError: Boolean(event.isError),
               running: false,
             };
-            return copy;
+            return next;
           });
           return;
         }
-        case "working_state_changed": {
-          const state = String(event.state ?? "");
-          setBusy(state !== "idle" && state !== "waiting_for_input");
-          return;
-        }
-        case "session_title_updated": {
-          if (event.title) setTitle(String(event.title));
+        case "assistant": {
+          const text = String(event.text ?? "");
+          if (!text.trim()) return;
+          appendItem({
+            kind: "assistant",
+            id: String(event.id ?? nextId()),
+            text,
+            streaming: false,
+          });
           return;
         }
         case "error": {
-          const message = String(event.message ?? event.error ?? "未知错误");
           appendItem({
             kind: "notice",
             id: nextId(),
-            text: message,
+            text: String(event.message ?? "未知错误"),
             tone: "error",
+          });
+          return;
+        }
+        case "interrupted": {
+          appendItem({
+            kind: "notice",
+            id: nextId(),
+            text: "已停止。",
+            tone: "info",
           });
           return;
         }
@@ -289,170 +134,177 @@ export function useDroid() {
     [appendItem],
   );
 
-  const disconnect = useCallback(() => {
-    try {
-      sessionRef.current?.detach?.();
-    } catch {
-      /* ignore */
-    }
-    try {
-      droidRef.current?.disconnect?.();
-    } catch {
-      /* ignore */
-    }
-    droidRef.current = null;
-    sessionRef.current = null;
-    summariesRef.current = [];
-    setStatus("idle");
-    setSessions([]);
-    setItems([]);
-    setSessionId(null);
-    setTitle("");
-    setBusy(false);
-  }, []);
-
-  const connect = useCallback(
-    async (config: ConnectionConfig) => {
-      setError(null);
-      setStatus("connecting");
-      try {
-        const droid = await connectToDaemon({
-          url: config.url,
-          auth: { apiKey: config.apiKey },
-          permissionHandler: permissionHandler as any,
-          onAuthenticationError: (err: Error) => setError(err.message),
-        });
-        droidRef.current = droid;
-        setStatus("connected");
-        return true;
-      } catch (err) {
-        setStatus("error");
-        setError(err instanceof Error ? err.message : String(err));
-        return false;
-      }
-    },
-    [permissionHandler],
-  );
-
   const refreshSessions = useCallback(async () => {
-    const droid = droidRef.current;
-    if (!droid) return;
+    const config = configRef.current;
+    if (!config) return;
     try {
-      const list = await droid.sessions.list({ limit: 40 });
-      summariesRef.current = list;
-      setSessions(
-        list.map((entry: any) => ({
-          id: String(entry.id),
-          title: String(entry.title ?? "(未命名)"),
-          cwd: entry.cwd ? String(entry.cwd) : undefined,
-          messageCount: Number(entry.messageCount ?? 0),
-          modified: entry.modifiedTime
-            ? new Date(entry.modifiedTime).toISOString()
-            : undefined,
-        })),
+      const data = await call<{ sessions: SessionRow[] }>(
+        config,
+        "/api/sessions",
+        { limit: 60 },
       );
+      setSessions(data.sessions ?? []);
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
-  const openSession = useCallback(
-    async (id: string) => {
-      const droid = droidRef.current;
-      if (!droid) return;
-      setItems([]);
-      setError(null);
-      setSessionId(id);
-      setTitle(sessions.find((row) => row.id === id)?.title ?? "");
-      try {
-        const summary = summariesRef.current.find(
-          (entry) => String(entry.id) === id,
-        );
-        if (summary?.getMessages) {
-          const raw = await summary.getMessages({ limit: 200 });
-          setItems(normalizeHistory(raw));
-        }
-        sessionRef.current = await droid.sessions.resume(id, {
-          permissionHandler: permissionHandler as any,
-        });
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    },
-    [permissionHandler, sessions],
-  );
-
-  const createSession = useCallback(
-    async (cwd: string, autonomy: "off" | "low" | "medium" | "high") => {
-      const droid = droidRef.current;
-      if (!droid) return null;
-      setItems([]);
-      setError(null);
-      try {
-        const level = (AutonomyLevel as Record<string, string>)[
-          autonomy.charAt(0).toUpperCase() + autonomy.slice(1)
-        ];
-        const session = await droid.sessions.create({
-          cwd,
-          autonomyLevel: level ?? autonomy,
-          permissionHandler: permissionHandler as any,
-        });
-        sessionRef.current = session;
-        setSessionId(String(session.id));
-        setTitle("");
-        return String(session.id);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        return null;
-      }
-    },
-    [permissionHandler],
-  );
-
-  const send = useCallback(
-    async (text: string) => {
-      const session = sessionRef.current;
-      if (!session || !text.trim()) return;
-      appendItem({ kind: "user", id: nextId(), text });
-      setBusy(true);
-      try {
-        for await (const event of session.stream(text, {
-          includePartialMessages: true,
-        })) {
-          handleEvent(event);
-        }
-      } catch (err) {
-        appendItem({
-          kind: "notice",
-          id: nextId(),
-          text: err instanceof Error ? err.message : String(err),
-          tone: "error",
-        });
-      } finally {
-        flushDelta();
-        setBusy(false);
-        setItems((prev) =>
-          prev.map((item) =>
-            item.kind === "assistant" && item.streaming
-              ? { ...item, streaming: false }
-              : item,
-          ),
-        );
-      }
-    },
-    [appendItem, flushDelta, handleEvent],
-  );
-
-  const stop = useCallback(async () => {
+  const connect = useCallback(async (config: ConnectionConfig) => {
+    setError(null);
+    setStatus("connecting");
     try {
-      await sessionRef.current?.interrupt?.();
-    } catch {
-      /* ignore */
+      const ping = await fetch(`${config.url}/api/ping`).then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<{ ok: boolean; name: string }>;
+      });
+      // A ping succeeds without the token, so validate it with a real call.
+      const data = await call<{ sessions: SessionRow[] }>(
+        config,
+        "/api/sessions",
+        { limit: 60 },
+      );
+      configRef.current = config;
+      setComputer(ping.name || config.name || "");
+      setSessions(data.sessions ?? []);
+      setStatus("connected");
+      return true;
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof Error ? err.message : String(err));
+      return false;
     }
   }, []);
 
-  const answerPermission = useCallback((outcome: string) => {
-    permissionResolveRef.current?.(outcome);
+  const disconnect = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    configRef.current = null;
+    setStatus("idle");
+    setSessions([]);
+    setItems([]);
+    setSessionId(null);
+    setTitle("");
+    setModel("");
+    setBusy(false);
+  }, []);
+
+  const openSession = useCallback(
+    async (id: string) => {
+      const config = configRef.current;
+      if (!config) return;
+      setItems([]);
+      setError(null);
+      setSessionId(id);
+      const row = sessions.find((session) => session.id === id);
+      setTitle(row?.title || "");
+      cwdRef.current = row?.cwd || "";
+      try {
+        const data = await call<{ items: ChatItem[] }>(config, "/api/history", {
+          sessionId: id,
+        });
+        setItems(data.items ?? []);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [sessions],
+  );
+
+  const createSession = useCallback(async (cwd: string, autonomy: Autonomy) => {
+    cwdRef.current = cwd;
+    autonomyRef.current = autonomy;
+    setItems([]);
+    setError(null);
+    setSessionId(null);
+    setTitle("");
+    return "new";
+  }, []);
+
+  const send = useCallback(
+    async (text: string) => {
+      const config = configRef.current;
+      if (!config || !text.trim()) return;
+      appendItem({ kind: "user", id: nextId(), text });
+      setBusy(true);
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      try {
+        const response = await fetch(`${config.url}/api/prompt`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-droid-pocket-token": config.token,
+          },
+          body: JSON.stringify({
+            text,
+            sessionId,
+            cwd: cwdRef.current,
+            autonomy: autonomyRef.current,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok || !response.body) {
+          const detail = await response.text();
+          let message = detail || `HTTP ${response.status}`;
+          try {
+            message =
+              (JSON.parse(detail) as { error?: string }).error ?? message;
+          } catch {
+            /* keep the raw body */
+          }
+          throw new Error(message);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let index = buffer.indexOf("\n");
+          while (index >= 0) {
+            const line = buffer.slice(0, index).trim();
+            buffer = buffer.slice(index + 1);
+            if (line) {
+              try {
+                handleEvent(JSON.parse(line) as Record<string, unknown>);
+              } catch {
+                /* ignore malformed lines */
+              }
+            }
+            index = buffer.indexOf("\n");
+          }
+        }
+      } catch (err) {
+        const aborted =
+          err instanceof DOMException && err.name === "AbortError";
+        if (!aborted) {
+          appendItem({
+            kind: "notice",
+            id: nextId(),
+            text: err instanceof Error ? err.message : String(err),
+            tone: "error",
+          });
+        }
+      } finally {
+        abortRef.current = null;
+        setBusy(false);
+        // Pick up the auto-generated title for a freshly created session.
+        void refreshSessions();
+      }
+    },
+    [appendItem, handleEvent, refreshSessions, sessionId],
+  );
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
   }, []);
 
   return {
@@ -461,9 +313,10 @@ export function useDroid() {
     sessions,
     items,
     busy,
-    permission,
     title,
     sessionId,
+    computer,
+    model,
     connect,
     disconnect,
     refreshSessions,
@@ -471,13 +324,5 @@ export function useDroid() {
     createSession,
     send,
     stop,
-    answerPermission,
-    patchItem,
   };
 }
-
-export const OUTCOMES = {
-  once: ToolConfirmationOutcome.ProceedOnce,
-  always: ToolConfirmationOutcome.ProceedAlways,
-  cancel: ToolConfirmationOutcome.Cancel,
-};

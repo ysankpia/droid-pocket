@@ -71,7 +71,7 @@ export default function SessionsScreen({
             >
               <div className="row-title">{session.title}</div>
               <div className="row-meta">
-                <span>{session.messageCount} 条消息</span>
+                <span>{session.cwd ? "会话" : "本机会话"}</span>
                 <span>{relative(session.modified)}</span>
               </div>
               {session.cwd ? (

@@ -32,17 +32,10 @@ export interface ChatNoticeItem {
 export type ChatItem =
   ChatUserItem | ChatAssistantItem | ChatToolItem | ChatNoticeItem;
 
-export interface PendingPermission {
-  id: string;
-  title: string;
-  detail: string;
-  resolve: (outcome: string) => void;
-}
-
 export interface SessionRow {
   id: string;
   title: string;
   cwd?: string;
-  messageCount: number;
+  messageCount?: number;
   modified?: string;
 }

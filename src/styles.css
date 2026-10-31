@@ -758,3 +758,28 @@ textarea {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ---------------------------------------------------------------- pairing */
+
+.scan-btn {
+  margin-bottom: 18px;
+  padding: 16px;
+  font-size: 15px;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 18px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}

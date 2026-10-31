@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import ConnectScreen from "./screens/ConnectScreen";
 import SessionsScreen from "./screens/SessionsScreen";
 import ChatScreen from "./screens/ChatScreen";
-import PermissionSheet from "./components/PermissionSheet";
 import {
   DEFAULT_CONFIG,
   loadConfig,
@@ -44,8 +43,9 @@ export default function App() {
   ) => {
     const id = await droid.createSession(cwd, autonomy);
     if (id) {
-      setConfig((prev) => ({ ...prev, cwd }));
-      await saveConfig({ ...config, cwd });
+      const next = { ...config, cwd };
+      setConfig(next);
+      await saveConfig(next);
       setView("chat");
     }
   };
@@ -96,10 +96,6 @@ export default function App() {
             await droid.refreshSessions();
           }}
         />
-      ) : null}
-
-      {droid.permission ? (
-        <PermissionSheet permission={droid.permission} />
       ) : null}
     </div>
   );
