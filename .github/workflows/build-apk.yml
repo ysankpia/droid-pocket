@@ -27,8 +27,10 @@ jobs:
       - name: Ensure Android SDK platform
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          if [ -z "$SDKMGR" ]; then echo "sdkmanager not found"; exit 1; fi
+          (yes | "$SDKMGR" --licenses > /dev/null 2>&1) || true
+          "$SDKMGR" "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
           echo "sdk.dir=$ANDROID_HOME" > android/local.properties
 
       - name: Install dependencies
