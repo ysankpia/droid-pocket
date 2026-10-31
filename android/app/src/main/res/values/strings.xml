@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Droid Pocket</string>
+    <string name="title_activity_main">Droid Pocket</string>
+    <string name="package_name">app.droidpocket.mobile</string>
+    <string name="custom_url_scheme">app.droidpocket.mobile</string>
+</resources>
